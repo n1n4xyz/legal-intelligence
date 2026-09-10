@@ -19,6 +19,7 @@ import asyncio
 # Google AI imports
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 # Internal imports
 from ..models.legal_models import (
@@ -34,6 +35,50 @@ from .quality_validator import QualityValidator
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Compatibility layer
+# ---------------------------------------------------------------------------
+# The project runs on the google-genai SDK (see requirements.txt). The provided
+# tests in tests/test_todos.py were written against the retired
+# vertexai.generative_models SDK and patch `vertexai` and `GenerativeModel` in
+# this module. These two thin wrappers expose that older interface on top of
+# genai.Client, so the tests and the real runtime go through one code path.
+# ---------------------------------------------------------------------------
+
+class _VertexAIClientFactory:
+    """Mirrors vertexai.init() and holds a genai.Client configured for Vertex AI."""
+
+    def __init__(self):
+        self.client: Optional[genai.Client] = None
+
+    def init(self, project: str, location: str) -> None:
+        self.client = genai.Client(vertexai=True, project=project, location=location)
+
+
+vertexai = _VertexAIClientFactory()
+
+
+class GenerativeModel:
+    """Mirrors GenerativeModel.generate_content() on top of genai.Client."""
+
+    def __init__(self, model_name: str):
+        if vertexai.client is None:
+            raise RuntimeError("Call vertexai.init() before creating a GenerativeModel")
+        self.model_name = model_name
+        self._client = vertexai.client
+
+    def generate_content(
+        self,
+        contents: Any,
+        generation_config: Optional[types.GenerateContentConfig] = None
+    ):
+        return self._client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=generation_config
+        )
+
+
 class LegalIntelligenceAgent:
     """
     Main orchestrator for the Legal Intelligence AI System.
@@ -46,12 +91,13 @@ class LegalIntelligenceAgent:
     YOUR MISSION: Fix the TODOs to make this system work!
     """
 
-    def __init__(self, project_id: str, location: str = "us-central1", model_name: str = "gemini-2.0-flash"):
+    def __init__(self, project_id: str, location: str = "us-central1", model_name: str = "gemini-2.5-flash"):
         """Initialize the Legal Intelligence Agent system."""
         self.project_id = project_id
         self.location = location
         self.model_name = model_name
         self.client = None
+        self.model = None
         self.initialized = False
 
         # Components
@@ -69,7 +115,9 @@ class LegalIntelligenceAgent:
             temperature=0.7,
             top_p=0.95,
             top_k=40,
-            max_output_tokens=2048,
+            # Gemini 2.5 and newer count thinking tokens against this limit.
+            # 2048 truncates sections or returns empty text, so allow more room.
+            max_output_tokens=8192,
         )
 
         logger.info(f"LegalIntelligenceAgent initialized for project {project_id}")
@@ -99,17 +147,29 @@ class LegalIntelligenceAgent:
             logger.info(f"Initializing Vertex AI for project: {self.project_id}")
 
             # TODO 1: Initialize Vertex AI
-            # YOUR CODE HERE (approximately 10-15 lines)
-            # Steps:
-            # 1. Initialize vertexai with project and location
-            # 2. Create the GenerativeModel instance
-            # 3. Test with a simple prompt
-            # 4. Check the response
-            # 5. Set self.initialized = True if successful
-            # 6. Return True for success, False for failure
+            # 1. Create the Vertex AI client for project and location
+            vertexai.init(project=self.project_id, location=self.location)
+            self.client = getattr(vertexai, "client", None)
 
-            logger.error("TODO 1 not implemented: Vertex AI initialization failed")
-            return False
+            # 2. Create the model wrapper used by all agents
+            self.model = GenerativeModel(self.model_name)
+
+            # 3. Smoke test with a tiny prompt (a fraction of a cent)
+            test_config = types.GenerateContentConfig(temperature=0.0, max_output_tokens=256)
+            response = self.model.generate_content(
+                "Reply with the single word OK.",
+                generation_config=test_config
+            )
+
+            # 4. Any response without an exception proves auth, API and model ID work
+            if response is None:
+                raise RuntimeError("Vertex AI returned no response to the test prompt")
+            logger.info(f"Vertex AI test response: {str(getattr(response, 'text', ''))[:50]!r}")
+
+            # 5. Mark as ready
+            self.initialized = True
+            logger.info(f"Vertex AI ready: model={self.model_name}, location={self.location}")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI: {str(e)}")
@@ -160,25 +220,69 @@ class LegalIntelligenceAgent:
         # Build the comprehensive prompt
         prompt = self._build_prompt(persona, section_type, scenario, previous_sections)
 
-        # TODO 2: Implement content generation with retry logic
-        # YOUR CODE HERE (approximately 25-35 lines)
-        # Steps:
-        # 1. Set max_retries = 3
-        # 2. Loop for retry attempts
-        # 3. Try to generate content using self.model.generate_content()
-        # 4. Extract text from response
-        # 5. Create TokenUsage from response.usage_metadata
-        # 6. Calculate cost using self._calculate_cost()
-        # 7. Handle exceptions with exponential backoff
-        # 8. Return (content, token_usage, cost)
+        # TODO 2: Content generation with retry logic
+        max_retries = 3
+        last_error: Optional[Exception] = None
 
-        # DUMMY IMPLEMENTATION - REPLACE THIS!
-        logger.warning("TODO 2 not implemented: Using dummy content")
-        dummy_content = f"[BROKEN] This is dummy content for {section_type}. The AI generation is not working."
-        dummy_tokens = TokenUsage(input_tokens=100, output_tokens=50, total_tokens=150)
-        dummy_cost = 0.01
+        for attempt in range(max_retries):
+            self.total_attempts += 1
+            try:
+                response = self.model.generate_content(
+                    prompt,
+                    generation_config=self.generation_config
+                )
 
-        return dummy_content, dummy_tokens, dummy_cost
+                content = (getattr(response, "text", None) or "").strip()
+                if not content:
+                    raise ValueError("Model returned empty content")
+
+                # Token tracking. Thinking tokens are billed as output tokens.
+                usage = getattr(response, "usage_metadata", None)
+                input_tokens = self._as_int(getattr(usage, "prompt_token_count", 0))
+                output_tokens = (
+                    self._as_int(getattr(usage, "candidates_token_count", 0))
+                    + self._as_int(getattr(usage, "thoughts_token_count", 0))
+                )
+                total_tokens = (
+                    self._as_int(getattr(usage, "total_token_count", 0))
+                    or input_tokens + output_tokens
+                )
+                token_usage = TokenUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens
+                )
+                cost = float(self._calculate_cost(token_usage))
+
+                # Performance tracking
+                self.token_usage_history.append(token_usage)
+                self.processing_times.append(time.time() - start_time)
+                self.success_count += 1
+
+                logger.info(
+                    f"Generated {section_type} on attempt {attempt + 1}: "
+                    f"{total_tokens} tokens, ${cost:.5f}"
+                )
+                return content, token_usage, cost
+
+            except Exception as e:
+                last_error = e
+
+                # 400/403/404 will fail the same way again, so stop immediately
+                if isinstance(e, genai_errors.ClientError) and getattr(e, "code", None) in (400, 401, 403, 404):
+                    logger.error(f"Non-retryable error for {section_type}: {e}")
+                    break
+
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed for {section_type}: {e}"
+                )
+                if attempt < max_retries - 1:
+                    wait_seconds = 2 ** attempt  # 1s, 2s
+                    time.sleep(wait_seconds)
+
+        raise RuntimeError(
+            f"Content generation failed for {section_type} after retries: {last_error}"
+        ) from last_error
 
     async def generate_complete_report(self, scenario: LegalScenario) -> AnalysisReport:
         """
@@ -211,49 +315,201 @@ class LegalIntelligenceAgent:
         logger.info(f"Starting complete report generation for case: {scenario.case_name}")
         start_time = time.time()
 
-        # TODO 3: Implement complete report generation
-        # YOUR CODE HERE (approximately 40-60 lines)
-        # Steps:
-        # 1. Define section_config with (section_type, persona) pairs
-        # 2. Initialize sections list and total_cost
-        # 3. Loop through section_config
-        # 4. Get persona using self.personas.get_persona()
-        # 5. Generate content using: await asyncio.to_thread(self.generate_section_content, ...)
-        #    IMPORTANT: Use asyncio.to_thread() to prevent blocking the event loop!
-        # 6. Validate quality using self.quality_validator.validate_section()
-        # 7. Retry if quality < 0.7 (also use asyncio.to_thread for retry)
-        # 8. Create ReportSection objects
-        # 9. Assemble final AnalysisReport
-
-        # DUMMY IMPLEMENTATION - REPLACE THIS!
-        logger.warning("TODO 3 not implemented: Generating dummy report")
-
-        dummy_sections = [
-            ReportSection(
-                type="liability_assessment",
-                title="Liability Assessment",
-                content="[BROKEN] Dummy liability content",
-                agent_type="business_analyst",
-                quality_score=0.5,
-                tokens_used=100,
-                cost=0.01,
-                timestamp=datetime.now().isoformat()
-            )
+        # TODO 3: Complete report generation
+        # 1. Section sequence with persona assignments. Order matters: each
+        #    specialist builds on the analysis of the ones before.
+        section_config = [
+            ("liability_assessment", "business_analyst"),
+            ("damage_calculation", "business_analyst"),
+            ("prior_art_analysis", "market_researcher"),
+            ("competitive_landscape", "market_researcher"),
+            ("risk_assessment", "strategic_consultant"),
+            ("strategic_recommendations", "strategic_consultant"),
         ]
 
-        dummy_report = AnalysisReport(
+        quality_threshold = self.quality_validator.min_quality_threshold  # 0.7
+        max_quality_retries = 2  # hard cap so a weak section can't loop forever
+
+        # 2. Report state
+        sections: List[ReportSection] = []          # everything that goes into the report
+        context_sections: List[ReportSection] = []  # only successful sections feed the chain
+        total_cost = 0.0
+        total_tokens = 0
+        quality_retries_used = 0
+        below_threshold: List[str] = []
+        failed_sections: List[Dict[str, str]] = []
+        quality_audit: List[Dict[str, Any]] = []
+
+        # 3. Generate each section in sequence
+        for section_type, agent_type in section_config:
+            persona = self.personas.get_persona(agent_type)
+            expected_elements = self._get_expected_elements(section_type)
+            attempt_scores: List[float] = []
+
+            # 4. First attempt. Context chain: all previous sections are passed on.
+            #    asyncio.to_thread keeps the FastAPI event loop responsive.
+            try:
+                content, usage, cost = await asyncio.to_thread(
+                    self.generate_section_content,
+                    persona,
+                    section_type,
+                    scenario,
+                    list(context_sections)
+                )
+            except Exception as e:
+                # Auth, permission or model-ID errors hit every section the same way: fail fast
+                cause = e.__cause__ or e
+                if isinstance(cause, genai_errors.ClientError) and getattr(cause, "code", None) in (400, 401, 403, 404):
+                    raise
+
+                # Transient failure: degrade gracefully, mark the gap and keep going
+                logger.error(f"{section_type} failed after retries, continuing without it: {e}")
+                failed_sections.append({"section": section_type, "error": str(e)[:200]})
+                sections.append(ReportSection(
+                    type=section_type,
+                    title=self._get_section_title(section_type),
+                    content=(
+                        f"This section could not be generated ({type(cause).__name__}). "
+                        f"Re-run the analysis before relying on this report."
+                    ),
+                    agent_type=agent_type,
+                    quality_score=0.0,
+                    tokens_used=0,
+                    cost=0.0,
+                    timestamp=datetime.now().isoformat()
+                ))
+                continue
+
+            section_tokens = usage.total_tokens
+            section_cost = cost
+            quality = self.quality_validator.validate_section(content, section_type, expected_elements)
+            attempt_scores.append(round(float(quality.overall_score), 3))
+
+            best_content, best_quality = content, quality
+
+            # 5. Quality validation loop: retry with the validator's feedback
+            attempt = 0
+            while best_quality.overall_score < quality_threshold and attempt < max_quality_retries:
+                attempt += 1
+                quality_retries_used += 1
+                logger.info(
+                    f"{section_type} scored {best_quality.overall_score:.2f} "
+                    f"(< {quality_threshold}), retry {attempt}/{max_quality_retries}"
+                )
+                enhanced_persona = persona + self._build_quality_feedback(
+                    best_quality, expected_elements, attempt
+                )
+                try:
+                    content, usage, cost = await asyncio.to_thread(
+                        self.generate_section_content,
+                        enhanced_persona,
+                        section_type,
+                        scenario,
+                        list(context_sections)
+                    )
+                except Exception as e:
+                    logger.warning(f"Quality retry for {section_type} failed, keeping best version: {e}")
+                    break
+
+                section_tokens += usage.total_tokens
+                section_cost += cost
+                quality = self.quality_validator.validate_section(content, section_type, expected_elements)
+                attempt_scores.append(round(float(quality.overall_score), 3))
+
+                # Keep whichever version scores higher
+                if quality.overall_score > best_quality.overall_score:
+                    best_content, best_quality = content, quality
+
+            if best_quality.overall_score < quality_threshold:
+                below_threshold.append(section_type)
+                logger.warning(
+                    f"{section_type} stayed below threshold after retries: "
+                    f"{best_quality.overall_score:.2f}"
+                )
+
+            # Audit trail: every attempt and the version that was kept
+            quality_audit.append({
+                "section": section_type,
+                "agent": agent_type,
+                "attempt_scores": attempt_scores,
+                "selected_score": round(float(best_quality.overall_score), 3),
+                "tokens": section_tokens,
+                "cost_usd": round(section_cost, 6),
+            })
+
+            # 6. Store the section so the next specialist receives it as context
+            section = ReportSection(
+                type=section_type,
+                title=self._get_section_title(section_type),
+                content=best_content,
+                agent_type=agent_type,
+                quality_score=round(float(best_quality.overall_score), 3),
+                tokens_used=section_tokens,
+                cost=section_cost,
+                timestamp=datetime.now().isoformat()
+            )
+            sections.append(section)
+            context_sections.append(section)
+            total_tokens += section_tokens
+            total_cost += section_cost
+
+        if not context_sections:
+            raise RuntimeError(f"All report sections failed for {scenario.case_name}: {failed_sections}")
+
+        # 7. Assemble the final report
+        processing_time = time.time() - start_time
+        confidence_score = sum(s.quality_score for s in sections) / len(sections)
+
+        report = AnalysisReport(
             scenario=scenario,
-            sections=dummy_sections,
-            executive_summary="[BROKEN] System not working - TODOs not implemented",
-            total_cost=0.01,
-            total_tokens=100,
-            processing_time=1.0,
-            confidence_score=0.5,
+            sections=sections,
+            executive_summary=self._generate_executive_summary(sections, scenario),
+            total_cost=round(total_cost, 6),
+            total_tokens=total_tokens,
+            processing_time=round(processing_time, 2),
+            confidence_score=round(confidence_score, 3),
             timestamp=datetime.now().isoformat(),
-            metadata={"error": "TODOs not implemented"}
+            metadata={
+                "model": self.model_name,
+                "section_sequence": [s for s, _ in section_config],
+                "context_chaining": "each section receives all previously completed sections",
+                "quality_threshold": quality_threshold,
+                "quality_retries_used": quality_retries_used,
+                "sections_below_threshold": below_threshold,
+                "failed_sections": failed_sections,
+                "quality_audit": quality_audit,
+                "success_rate": round(self.get_success_rate(), 3),
+            }
         )
 
-        return dummy_report
+        logger.info(
+            f"Report complete for {scenario.case_name}: {len(sections)} sections, "
+            f"confidence {confidence_score:.2f}, {total_tokens} tokens, "
+            f"${total_cost:.4f}, {processing_time:.1f}s"
+        )
+        return report
+
+    def _build_quality_feedback(self, quality: Any, expected_elements: List[str], attempt: int) -> str:
+        """Turn validator feedback into instructions appended to the persona for a retry."""
+        feedback_items = getattr(quality, "feedback", None)
+        feedback_items = feedback_items if isinstance(feedback_items, list) else []
+        feedback_text = "\n".join(f"- {item}" for item in feedback_items) or "- Add depth and specific evidence"
+
+        return (
+            f"\n\nQUALITY REVIEW (retry {attempt}):\n"
+            f"Your previous draft scored {quality.overall_score:.2f}, below the required 0.70.\n"
+            f"Fix these issues:\n{feedback_text}\n"
+            f"- Explicitly cover: {', '.join(expected_elements)}\n"
+            f"- Write at least 4 paragraphs separated by blank lines\n"
+            f"- Use First, Second, Finally to structure the reasoning\n"
+            f"- Tie every conclusion to a fact or figure from the complaint\n"
+            f"- End with a short conclusion paragraph\n"
+        )
+
+    @staticmethod
+    def _as_int(value: Any) -> int:
+        """Return value if it is a real int (SDK fields can be None), else 0."""
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
     def _build_prompt(
         self,
@@ -281,10 +537,13 @@ Think through each step carefully before moving to the next.
 
         # Add context from previous sections if available
         if previous_sections:
-            prompt += "\n\nPREVIOUS ANALYSIS:\n"
-            for section in previous_sections[-2:]:  # Include last 2 sections for context
-                prompt += f"\n{section.title}:\n"
-                prompt += f"{section.content[:500]}...\n"  # Include summary
+            prompt += "\n\nPREVIOUS ANALYSIS FROM OTHER SPECIALISTS (build on this, don't repeat it):\n"
+            # All earlier sections, so the strategist also sees liability and damages.
+            # The two most recent get more room because they're the closest context.
+            for i, section in enumerate(previous_sections):
+                limit = 1200 if i >= len(previous_sections) - 2 else 600
+                prompt += f"\n{section.title} ({section.agent_type}):\n"
+                prompt += f"{section.content[:limit]}...\n"
 
         # Add the specific task
         prompt += f"\n\nTASK: Provide a {section_type.replace('_', ' ')} for the following legal case:\n\n"
@@ -405,12 +664,25 @@ Provide strategic recommendations by:
 
         return summary
 
+    # USD per 1M tokens, Vertex AI standard tier (checked September 2026).
+    # Thinking tokens are billed at the output rate. Add a row when you switch models.
+    MODEL_PRICING_PER_1M = {
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    }
+
     def _calculate_cost(self, token_usage: TokenUsage) -> float:
-        """Calculate cost based on token usage."""
-        # Example pricing (adjust based on actual Vertex AI pricing)
-        # Gemini pricing as of 2024: ~$0.00025 per 1K input tokens, ~$0.00125 per 1K output tokens
-        input_cost = (token_usage.input_tokens / 1000) * 0.00025
-        output_cost = (token_usage.output_tokens / 1000) * 0.00125
+        """Estimate cost from token usage using the pricing table for the active model."""
+        pricing = self.MODEL_PRICING_PER_1M.get(self.model_name)
+        if pricing is None:
+            if not getattr(self, "_pricing_warned", False):
+                logger.warning(
+                    f"No pricing entry for {self.model_name}, estimating with gemini-2.5-flash rates"
+                )
+                self._pricing_warned = True
+            pricing = self.MODEL_PRICING_PER_1M["gemini-2.5-flash"]
+        input_cost = (token_usage.input_tokens / 1_000_000) * pricing["input"]
+        output_cost = (token_usage.output_tokens / 1_000_000) * pricing["output"]
         return input_cost + output_cost
 
     # Metric tracking methods

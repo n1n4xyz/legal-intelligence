@@ -8,6 +8,7 @@ Your mission: Implement the scoring algorithms in TODOs 4 and 5.
 """
 
 import logging
+import re
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 import statistics
@@ -131,19 +132,47 @@ class QualityValidator:
         - Cap the final score at 1.0
         """
         score = 0.0
+        if not content or not content.strip():
+            return 0.0
 
-        # TODO 4: Implement coherence scoring algorithm
-        # YOUR CODE HERE (approximately 30-40 lines)
-        # Steps:
-        # 1. Check paragraph structure (split by '\n\n')
-        # 2. Count logical connectors
-        # 3. Check for structured thinking markers
-        # 4. Measure content depth (sentence count)
-        # 5. Calculate final score (cap at 1.0)
+        text_lower = content.lower()
 
-        # BROKEN IMPLEMENTATION - FIX THIS!
-        logger.warning("TODO 4 not implemented: Coherence scoring broken")
-        return 0.0  # Always returns 0 - FIX THIS!
+        # 1. Paragraph structure (+0.3). Blank lines with spaces still count as breaks.
+        paragraphs = [p for p in re.split(r"\n\s*\n", content) if p.strip()]
+        if len(paragraphs) >= 3:
+            score += 0.3
+        elif len(paragraphs) == 2:
+            score += 0.15
+
+        # 2. Logical connectors (+0.2, full points at 3 or more)
+        connectors = [
+            "therefore", "however", "furthermore", "moreover", "consequently",
+            "additionally", "in addition", "as a result", "thus", "hence",
+            "accordingly", "nevertheless", "in contrast", "similarly", "because",
+        ]
+        connector_count = self._count_phrases(text_lower, connectors)
+        score += min(connector_count / 3, 1.0) * 0.2
+
+        # 3. Structured thinking (+0.2): sequence words or numbered/bulleted lists
+        structure_markers = [
+            "first", "second", "third", "fourth", "finally", "next",
+            "lastly", "in conclusion", "to summarize", "step 1", "step 2",
+        ]
+        structure_count = self._count_phrases(text_lower, structure_markers)
+        structure_count += len(re.findall(r"^\s*(?:\d+[.)]|[-*\u2022])\s+", content, re.MULTILINE))
+        score += min(structure_count / 3, 1.0) * 0.2
+
+        # 4. Content depth (+0.3 at 8+ sentences, partial credit below)
+        sentences = [s for s in re.split(r"[.!?]+(?:\s+|$)", content) if len(s.strip()) > 3]
+        if len(sentences) >= 8:
+            score += 0.3
+        elif len(sentences) >= 5:
+            score += 0.2
+        elif len(sentences) >= 3:
+            score += 0.1
+
+        # 5. Cap at 1.0
+        return round(min(score, 1.0), 3)
 
     def calculate_groundedness_score(
         self,
@@ -191,20 +220,83 @@ class QualityValidator:
         - Cap the final score at 1.0
         """
         score = 0.0
+        if not content or not content.strip():
+            return 0.0
 
-        # TODO 5: Implement groundedness scoring algorithm
-        # YOUR CODE HERE (approximately 35-45 lines)
-        # Steps:
-        # 1. Define section-specific keywords dictionary
-        # 2. Get keywords for this section_type
-        # 3. Calculate keyword coverage
-        # 4. Check for reasoning indicators
-        # 5. Check expected elements coverage
-        # 6. Calculate final score (cap at 1.0)
+        text_lower = content.lower()
 
-        # BROKEN IMPLEMENTATION - FIX THIS!
-        logger.warning("TODO 5 not implemented: Groundedness scoring broken")
-        return 0.0  # Always returns 0 - FIX THIS!
+        # 1. Section-specific vocabulary
+        section_keywords = {
+            "liability_assessment": [
+                "liability", "liable", "negligence", "breach", "duty", "causation",
+                "claim", "evidence", "precedent", "infringement", "willful",
+                "burden of proof", "defendant", "plaintiff", "probability",
+            ],
+            "damage_calculation": [
+                "damages", "compensation", "calculation", "quantum", "lost profits",
+                "reasonable royalty", "price erosion", "punitive", "treble",
+                "economic loss", "methodology", "revenue", "market share", "$",
+            ],
+            "prior_art_analysis": [
+                "prior art", "patent", "novelty", "obviousness", "anticipation",
+                "validity", "invalidity", "claims", "inter partes review",
+                "freedom to operate", "uspto", "prosecution history", "35 u.s.c",
+            ],
+            "competitive_landscape": [
+                "competitor", "market share", "positioning", "market", "advantage",
+                "licensing", "barriers to entry", "differentiation", "pricing",
+                "customers", "industry", "substitute",
+            ],
+            "risk_assessment": [
+                "risk", "probability", "impact", "mitigation", "exposure",
+                "likelihood", "severity", "contingency", "scenario", "reputational",
+                "worst case", "best case",
+            ],
+            "strategic_recommendations": [
+                "recommend", "strategy", "strategic", "implementation", "action",
+                "timeline", "priority", "resources", "milestone", "success metric",
+                "settlement", "roi", "next steps",
+            ],
+        }
+        keywords = section_keywords.get(section_type, ["analysis", "evidence", "conclusion", "assessment"])
+
+        # 2. Keyword coverage (up to 0.4). Full points once about half the
+        #    vocabulary appears, since no real section uses every term.
+        matched_keywords = sum(1 for kw in keywords if self._count_phrases(text_lower, [kw]) > 0)
+        keyword_target = max(3, len(keywords) // 2)
+        score += min(matched_keywords / keyword_target, 1.0) * 0.4
+
+        # 3. Evidence-based reasoning indicators (up to 0.3, full at 3+)
+        reasoning_indicators = [
+            "based on", "because", "due to", "as a result", "given that",
+            "since", "according to", "demonstrates", "indicates", "supported by",
+            "evidenced by", "as shown", "which means", "leads to",
+        ]
+        reasoning_count = self._count_phrases(text_lower, reasoning_indicators)
+        # Concrete figures (dollar amounts, percentages) count as evidence too
+        if re.search(r"\$\s?\d|\d+(?:\.\d+)?\s?%", content):
+            reasoning_count += 1
+        score += min(reasoning_count / 3, 1.0) * 0.3
+
+        # 4. Expected elements coverage (up to 0.3)
+        if expected_elements:
+            covered = sum(1 for el in expected_elements if el.lower() in text_lower)
+            score += (covered / len(expected_elements)) * 0.3
+
+        # 5. Cap at 1.0
+        return round(min(score, 1.0), 3)
+
+    @staticmethod
+    def _count_phrases(text_lower: str, phrases: List[str]) -> int:
+        """Count occurrences of phrases, matching at word starts so 'thus' doesn't hit 'enthusiasm'."""
+        total = 0
+        for phrase in phrases:
+            if phrase[0].isalnum():
+                pattern = r"\b" + re.escape(phrase)
+            else:
+                pattern = re.escape(phrase)
+            total += len(re.findall(pattern, text_lower))
+        return total
 
     def _calculate_completeness_score(self, content: str, expected_elements: List[str]) -> float:
         """Calculate how completely the content addresses requirements."""
