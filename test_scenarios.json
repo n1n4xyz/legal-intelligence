@@ -1,0 +1,40 @@
+{
+  "scenarios": [
+    {
+      "case_name": "TechFlow Innovations v. DataSync Corp",
+      "complaint_text": "COMPLAINT FOR PATENT INFRINGEMENT\n\nPlaintiff TechFlow Innovations Inc. ('TechFlow') brings this action against Defendant DataSync Corporation ('DataSync') for willful infringement of U.S. Patent No. 9,123,456 ('the '456 Patent').\n\nTechFlow is the owner of all rights, title, and interest in the '456 Patent, entitled 'System and Method for Real-Time Data Synchronization Across Distributed Networks.' The patent was duly and legally issued by the USPTO on September 15, 2020.\n\nDataSync has directly infringed and continues to infringe the '456 Patent by making, using, selling, and offering for sale within the United States products that embody the patented invention, specifically DataSync's 'CloudSync Pro' platform.\n\nThe CloudSync Pro platform practices each and every element of at least claims 1-5 and 10-15 of the '456 Patent. DataSync's infringement has been willful and deliberate, as TechFlow notified DataSync of the '456 Patent and its infringement via letter dated January 10, 2024.\n\nAs a direct result of DataSync's infringement, TechFlow has suffered and continues to suffer substantial damages, including lost profits and price erosion. TechFlow's market share has declined from 45% to 32% since DataSync launched the infringing product.\n\nWHEREFORE, TechFlow requests that this Court:\n1. Enter judgment that DataSync has infringed the '456 Patent\n2. Award damages adequate to compensate for the infringement\n3. Treble the damages for willful infringement\n4. Issue a permanent injunction against further infringement\n5. Award attorneys' fees and costs",
+      "case_type": "IP",
+      "filing_date": "2024-03-15",
+      "parties_involved": ["TechFlow Innovations Inc.", "DataSync Corporation"],
+      "key_issues": [
+        "Patent infringement of U.S. Patent No. 9,123,456",
+        "Willful infringement claim",
+        "Lost profits and market share damages",
+        "Injunctive relief request"
+      ],
+      "urgency_level": "high",
+      "additional_context": "Preliminary injunction hearing scheduled for April 20, 2024. DataSync is a direct competitor with $500M in annual revenue from the allegedly infringing product."
+    },
+    {
+      "case_name": "MediTech Solutions v. HealthStream Analytics",
+      "complaint_text": "COMPLAINT FOR BREACH OF CONTRACT AND MISAPPROPRIATION OF TRADE SECRETS\n\nPlaintiff MediTech Solutions LLC ('MediTech') alleges against Defendant HealthStream Analytics Inc. ('HealthStream') as follows:\n\nOn June 1, 2023, the parties entered into a Strategic Partnership Agreement ('the Agreement') for joint development of an AI-powered medical diagnosis platform. Under the Agreement, MediTech would provide proprietary algorithms and HealthStream would provide healthcare data and distribution channels.\n\nSection 5.1 of the Agreement explicitly prohibits either party from independently developing or marketing competing products using shared technology or information for a period of 5 years.\n\nIn breach of the Agreement, HealthStream launched 'DiagnosticAI Pro' on January 5, 2024, which incorporates MediTech's proprietary algorithms that were shared under NDA as part of the partnership.\n\nHealthStream has also misappropriated MediTech's trade secrets, including:\n- Proprietary neural network architecture for symptom analysis\n- Training methodologies developed over 5 years at a cost of $12 million\n- Customer lists and pricing strategies shared during partnership discussions\n\nMediTech has suffered damages including:\n- Lost revenue of approximately $8 million from customers who switched to HealthStream\n- Diminished value of trade secrets estimated at $25 million\n- Development costs of $3 million for defensive measures\n\nWHEREFORE, MediTech demands judgment against HealthStream for breach of contract and trade secret misappropriation, including compensatory and punitive damages.",
+      "case_type": "Contract",
+      "filing_date": "2024-02-01",
+      "parties_involved": ["MediTech Solutions LLC", "HealthStream Analytics Inc."],
+      "key_issues": [
+        "Breach of non-compete agreement",
+        "Trade secret misappropriation",
+        "Damages calculation for lost revenue",
+        "Intellectual property theft"
+      ],
+      "urgency_level": "critical",
+      "additional_context": "HealthStream's product launch is gaining rapid market adoption. Emergency TRO hearing requested to prevent further customer acquisition using allegedly stolen technology."
+    }
+  ],
+  "test_config": {
+    "default_timeout": 30,
+    "max_retries": 3,
+    "quality_threshold": 0.7,
+    "validation_level": "standard"
+  }
+}
